@@ -36,7 +36,7 @@ long lastPush;
     #ifndef WIFI_HOST_NAME
         #define WIFI_HOST_NAME "ag_basic"
     #endif
-const auto deviceID = String(ESP.getChipId(), HEX);
+const auto deviceID = String(ESP.getChipId(), HEX).c_str();
 #endif
 
 #ifdef SERVER_ENABLED
@@ -51,12 +51,13 @@ auto server = ESP8266WebServer(SERVER_PORT);
 
 const int fetchFrequencyMS = 30000;
 long lastFetch;
-float temp;
-int rh;
-int co2;
-int pm1;
-int pm2;
-int pm10;
+// captured values
+char temp[6]; // "-99.9" to "999.9", + "\0"
+char rh[4];   // "0" to "100", + "\0"
+char co2[5];  // "0" to "9999", + "\0"
+char pm1[6];  // "0" to "65536", + "\0"
+char pm2[6];  // "0" to "65536", + "\0"
+char pm10[6]; // "0" to "65536", + "\0"
 
 auto sensors = AirGradient();
 auto display = U8G2_SSD1306_64X48_ER_1_HW_I2C(/* rotation=*/U8G2_R0, /* reset=*/U8X8_PIN_NONE);
@@ -82,13 +83,13 @@ void loop() {
 #endif
 }
 
-void displayThreeLines(String l1, String l2, String l3) {
+void displayThreeLines(const char* l1, const char* l2, const char* l3) {
     display.firstPage();
     do {
         display.setFont(u8g2_font_t0_16_tf);
-        display.drawStr(1, 10, l1.c_str());
-        display.drawStr(1, 28, l2.c_str());
-        display.drawStr(1, 46, l3.c_str());
+        display.drawStr(1, 10, l1);
+        display.drawStr(1, 28, l2);
+        display.drawStr(1, 46, l3);
     } while (display.nextPage());
 }
 
@@ -106,9 +107,20 @@ void fetchSensorsAndDisplay(long now) {
     lastFetch = now;
 
     TMP_RH tmpRh = sensors.periodicFetchData();
-    temp = tmpRh.t;
-    rh = tmpRh.rh;
-    co2 = sensors.getCO2_Raw();
+    if (tmpRh.t > 999.9) {
+        tmpRh.t = 999.9;
+    }
+    if (tmpRh.t < -99.9) {
+        tmpRh.t = -99.9;
+    }
+
+    if (tmpRh.rh > 100) {
+        tmpRh.rh = 100;
+    }
+    if (tmpRh.rh < 0) {
+        tmpRh.rh = 0;
+    }
+
     /*
     TODO:
       Modify lib to get all particulate data in one shot.
@@ -116,13 +128,13 @@ void fetchSensorsAndDisplay(long now) {
       value, although all values are contained in the
       singular sensors respone.
     */
-    pm1 = sensors.getPM1_Raw();
-    pm2 = sensors.getPM2_Raw();
-    pm10 = sensors.getPM10_Raw();
+    itoa(sensors.getPM1_Raw(), pm1, 10);
+    itoa(sensors.getPM2_Raw(), pm2, 10);
+    itoa(sensors.getPM10_Raw(), pm10, 10);
 
-    displayThreeLines("Temp: " + String(temp) + "°C",
-                      "RH: " + String(rh) + "%",
-                      "CO2: " + String(co2) + "ppm");
+    displayThreeLines(strcat("°C ", dtostrf(tmpRh.t, /* left-align x.x */ -3, 1, temp)),
+                      strcat("RH% ", itoa(tmpRh.rh, rh, 10)),
+                      strcat("CO2 ", itoa(sensors.getCO2_Raw(), co2, 10)));
 }
 
 #ifdef PUSH_ENABLED
@@ -198,24 +210,28 @@ void setupServer() {
     server.onFileUpload(std::function<void(void)>(
         []() { server.send(405, "text/plain", "not allowed"); }));
 
-    displayThreeLines("serving metrics", "on port", String(SERVER_PORT));
+    displayThreeLines("serving metrics", "on port", String(SERVER_PORT).c_str());
 }
 
 // TODO: move to prometheus format
 void serveMetrics() {
-    String idString = "{\"id\": \"" + deviceID + "\", \"mac\": \"" +
-                      WiFi.macAddress().c_str() + "\"}";
+    /*     String idString = "{\"id\": \"" + deviceID + "\", \"mac\": \"" +
+                          WiFi.macAddress().c_str() + "\"}";
 
-    String json = "{\n";
-    json += "  \"device\": " + idString + ",\n";
-    json += "  \"tempInC\": " + String(temp) + ",\n";
-    json += "  \"RH\": " + String(rh) + ",\n";
-    json += "  \"CO2\": " + String(co2) + ",\n";
-    json += "  \"PM1\": " + String(pm1) + ",\n";
-    json += "  \"PM2\": " + String(pm2) + ",\n";
-    json += "  \"PM10\": " + String(pm10) + ",\n";
-    json += "}";
+        String json = "{\n";
+        json += "  \"device\": " + idString + ",\n";
+        json += "  \"tempInC\": " + String(temp) + ",\n";
+        json += "  \"RH\": " + String(rh) + ",\n";
+        json += "  \"CO2\": " + String(co2) + ",\n";
+        json += "  \"PM1\": " + String(pm1) + ",\n";
+        json += "  \"PM2\": " + String(pm2) + ",\n";
+        json += "  \"PM10\": " + String(pm10) + ",\n";
+        json += "}";
 
-    server.send(200, "application/json", json);
+        server.send(200, "application/json", json); */
+}
+
+char* promGauge(char* name) {
+    return "todo";
 }
 #endif
