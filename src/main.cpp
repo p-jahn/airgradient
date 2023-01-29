@@ -1,15 +1,19 @@
 #include <AirGradient.h>
+// DNSServer.h is included to help platformio's dependency manager without
+// the need to resort to "deep" mode.
+#include <DNSServer.h>
 #include <ESP8266HTTPClient.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266WiFi.h>
 #include <U8g2lib.h>
 #include <WiFiClient.h>
-
 /*
 BUILD PARAMETER DEPENDENT SETUP
 */
 #if defined(PUSH_ENABLED) || defined(SERVER_ENABLED)
-    #define WIFI_ENABLED
+    #ifndef WIFI_ENABLED
+        #define WIFI_ENABLED
+    #endif
 #endif
 
 #ifdef PUSH_ENABLED
@@ -22,21 +26,21 @@ BUILD PARAMETER DEPENDENT SETUP
     #ifndef PUSH_PASSWORD
         #error "PUSH_PASSWORD is required when PUSH_ENABLED"
     #endif
-const int pushFrequency = 60000;
-long lastPush;
+const auto pushFrequency = 60000U;
+uint32_t lastPush;
 #endif
 
 #ifdef WIFI_ENABLED
-    #ifndef WIFI_PASSWORD
-        #error "WIFI_PASSWORD is required when WIFI_ENABLED"
+    #ifndef WIFI_SSID
+        #error "WIFI_SSID is required when WIFI_ENABLED"
     #endif
     #ifndef WIFI_PASSWORD
         #error "WIFI_PASSWORD is required when WIFI_ENABLED"
     #endif
-    #ifndef WIFI_HOST_NAME
-        #define WIFI_HOST_NAME "ag_basic"
-    #endif
-const auto deviceID = String(ESP.getChipId(), HEX).c_str();
+#endif
+
+#ifndef DEVICE_NAME
+    #define DEVICE_NAME "ag_basic"
 #endif
 
 #ifdef SERVER_ENABLED
@@ -44,44 +48,24 @@ const auto deviceID = String(ESP.getChipId(), HEX).c_str();
         #define SERVER_PORT 80
     #endif
 auto server = ESP8266WebServer(SERVER_PORT);
+String labels;
 #endif
 /*
 /BUILD PARAMETER DEPENDENT SETUP
 */
 
-const int fetchFrequencyMS = 30000;
-long lastFetch;
+const auto fetchFrequencyMS = 30000U;
+uint32_t lastFetch;
 // captured values
-char temp[6]; // "-99.9" to "999.9", + "\0"
-char rh[4];   // "0" to "100", + "\0"
-char co2[5];  // "0" to "9999", + "\0"
-char pm1[6];  // "0" to "65536", + "\0"
-char pm2[6];  // "0" to "65536", + "\0"
-char pm10[6]; // "0" to "65536", + "\0"
+String temp;
+String rh;
+String co2;
+String pm1;
+String pm2;
+String pm10;
 
 auto sensors = AirGradient();
 auto display = U8G2_SSD1306_64X48_ER_1_HW_I2C(/* rotation=*/U8G2_R0, /* reset=*/U8X8_PIN_NONE);
-
-void setup() {
-    Serial.begin(115200);
-
-    display.begin();
-
-#ifdef WIFI_ENABLED
-    setupWifi();
-#endif
-#ifdef SERVER_ENABLED
-    setupServer();
-#endif
-}
-
-void loop() {
-    auto t = millis();
-    fetchSensorsAndDisplay(t);
-#ifdef PUSH_ENABLED
-    pushInfluxMetrics(t);
-#endif
-}
 
 void displayThreeLines(const char* l1, const char* l2, const char* l3) {
     display.firstPage();
@@ -93,17 +77,11 @@ void displayThreeLines(const char* l1, const char* l2, const char* l3) {
     } while (display.nextPage());
 }
 
-void fetchSensorsAndDisplay(long now) {
-    /*
-    TOOD: handle overflows
-      We have 32 bits of milliseconds to work with
-      which is less than 25 days until overflow.
-      ... something like [last = curr < last ? long.MaxValue - last + curr : curr]
-    */
-
-    if ((now - lastFetch) <= fetchFrequencyMS) {
+void fetchSensorsAndDisplay(uint32_t now) {
+    if (((now - lastFetch) <= fetchFrequencyMS) && lastFetch != 0) {
         return;
     }
+
     lastFetch = now;
 
     TMP_RH tmpRh = sensors.periodicFetchData();
@@ -120,6 +98,9 @@ void fetchSensorsAndDisplay(long now) {
     if (tmpRh.rh < 0) {
         tmpRh.rh = 0;
     }
+    temp = String(tmpRh.t);
+    rh = String(tmpRh.rh);
+    co2 = String(sensors.getCO2_Raw());
 
     /*
     TODO:
@@ -128,17 +109,17 @@ void fetchSensorsAndDisplay(long now) {
       value, although all values are contained in the
       singular sensors respone.
     */
-    itoa(sensors.getPM1_Raw(), pm1, 10);
-    itoa(sensors.getPM2_Raw(), pm2, 10);
-    itoa(sensors.getPM10_Raw(), pm10, 10);
+    pm1 = String(sensors.getPM1_Raw());
+    pm2 = String(sensors.getPM2_Raw());
+    pm10 = String(sensors.getPM10_Raw());
 
-    displayThreeLines(strcat("°C ", dtostrf(tmpRh.t, /* left-align x.x */ -3, 1, temp)),
-                      strcat("RH% ", itoa(tmpRh.rh, rh, 10)),
-                      strcat("CO2 ", itoa(sensors.getCO2_Raw(), co2, 10)));
+    displayThreeLines(("C " + temp).c_str(),
+                      ("RH " + rh).c_str(),
+                      ("CO2 " + co2).c_str());
 }
 
 #ifdef PUSH_ENABLED
-void pushInfluxMetrics(long now) {
+void pushInfluxMetrics(uint32_t now) {
     if ((now - lastPush) <= pushFrequency) {
         return;
     }
@@ -151,7 +132,7 @@ void pushInfluxMetrics(long now) {
       setFingerprint(uint8_t[]). But then we would have to renew it when the
       certificate changes because we can't afford something like a trust store
       with our teeny tiny memory budget. Also, keeping track of the fingerprint
-      sounds very stressful - so lets joint the ~internet of shit~ :/
+      sounds very stressful - so lets join the ~internet of shit~ :/
 
       Maybe, somewhere in the future, insecure will be the fallback if we cannot
       find a matching fingerprint. We are already pushing stuff, we have a
@@ -171,12 +152,15 @@ void pushInfluxMetrics(long now) {
     http.addHeader("Authorization", "Bearer " PUSH_USER ":" PUSH_PASSWORD);
     http.addHeader("content-type", "application/json");
 
-    String header = "airquality,sender_id=" + String(deviceID);
-    String metrics = "temp=" + String(temp) + ",rh=" + String(rh) +
-                     ",co2=" + String(co2) + ",pm1=" + String(pm1) +
-                     ",pm2=" + String(pm2) + ",pm10=" + String(pm10);
-    String payload = header + " " + metrics;
-    auto responseCode = http.POST(payload);
+    char buf[256];
+    auto len = snprintf(buf, 256,
+                        "airquality,sender_id=%s temp=%s,rh=%s,co2=%s,pm1=%s,pm2=%s,pm10=%s",
+                        DEVICE_NAME, temp.c_str(), rh.c_str(), co2.c_str(), pm1.c_str(), pm2.c_str(), pm10.c_str());
+    if (len > 256) {
+        Serial.println("push metric was truncated...");
+    }
+
+    auto responseCode = http.POST(buf);
     http.end();
 
     if (responseCode >= 400) {
@@ -188,14 +172,15 @@ void pushInfluxMetrics(long now) {
 #ifdef WIFI_ENABLED
 void setupWifi() {
     WiFi.mode(WIFI_STA); // enforce station mode without access point
-    WiFi.setHostname(WIFI_HOST_NAME);
+    wifi_station_set_hostname(DEVICE_NAME);
+    WiFi.setHostname(DEVICE_NAME);
     WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
     int attempts = 1;
     while (WiFi.status() != WL_CONNECTED) {
-        displayThreeLines("connecting to",
+        displayThreeLines("connecting",
                           WIFI_SSID,
-                          attempts & 1 == 1 ? "just a moment" : "please wait");
+                          (attempts & 1) == 1 ? "please" : "wait");
         delay(500);
         attempts++;
     }
@@ -203,35 +188,95 @@ void setupWifi() {
 #endif
 
 #ifdef SERVER_ENABLED
+void setupLabels() {
+    char extra[64];
+    #ifdef LOCATION
+    snprintf(extra, 64, ",location=\"%s\"", LOCATION);
+    #endif
+
+    char buf[128];
+    snprintf(buf, 128,
+             "collection=\"Airgradient\",device=\"%s\"%s",
+             DEVICE_NAME, extra);
+
+    labels = String(buf);
+}
+
+void appendPromGauge(String& current, const char* name, const char* help, const char* value) {
+    char buf[256];
+    int len = snprintf(buf, 256,
+                       "#HELP %s %s\n"
+                       "#TYPE %s gauge\n"
+                       "%s{%s} %s\n",
+                       name, help, name, name, labels.c_str(), value);
+    if (len > 256) {
+        Serial.printf("prom metric (%s) was truncated...\n", name);
+    }
+    current += buf;
+}
+
+auto promMetrics = String();
+
+void serveMetrics() {
+    promMetrics.clear();
+    appendPromGauge(promMetrics, "temperature", "Temperature in °C", temp.c_str());
+    appendPromGauge(promMetrics, "humidity", "Realative humidity in %", rh.c_str());
+    appendPromGauge(promMetrics, "CO2", "CO2 concentraion in PPM", co2.c_str());
+    appendPromGauge(promMetrics, "particulate_matter_1", "particle count (1µm and below, atmospheric environment) in µg/m³", pm1.c_str());
+    appendPromGauge(promMetrics, "particulate_matter_2_5", "particle count (1µm to 2.5µm and below, atmospheric environment) in µg/m³", pm2.c_str());
+    appendPromGauge(promMetrics, "particulate_matter_10", "particle count (2.5µm to 10µm, atmospheric environment) in µg/m³", pm10.c_str());
+
+    server.send(200, "text/plain", promMetrics);
+}
+
 void setupServer() {
+    setupLabels();
+
     server.on("/", serveMetrics);
+    server.on("/metrics", serveMetrics);
     server.onNotFound(std::function<void(void)>(
         []() { server.send(404, "text/plain", "not found"); }));
     server.onFileUpload(std::function<void(void)>(
         []() { server.send(405, "text/plain", "not allowed"); }));
 
+    server.begin();
+
     displayThreeLines("serving metrics", "on port", String(SERVER_PORT).c_str());
-}
-
-// TODO: move to prometheus format
-void serveMetrics() {
-    /*     String idString = "{\"id\": \"" + deviceID + "\", \"mac\": \"" +
-                          WiFi.macAddress().c_str() + "\"}";
-
-        String json = "{\n";
-        json += "  \"device\": " + idString + ",\n";
-        json += "  \"tempInC\": " + String(temp) + ",\n";
-        json += "  \"RH\": " + String(rh) + ",\n";
-        json += "  \"CO2\": " + String(co2) + ",\n";
-        json += "  \"PM1\": " + String(pm1) + ",\n";
-        json += "  \"PM2\": " + String(pm2) + ",\n";
-        json += "  \"PM10\": " + String(pm10) + ",\n";
-        json += "}";
-
-        server.send(200, "application/json", json); */
-}
-
-char* promGauge(char* name) {
-    return "todo";
+    delay(1000);
 }
 #endif
+
+void setup() {
+    Serial.begin(9600);
+
+    display.begin();
+
+    displayThreeLines("CO2 init", "", "");
+    sensors.CO2_Init();
+    displayThreeLines("CO2 done", "PMS init", "");
+    sensors.PMS_Init();
+    displayThreeLines("CO2 done", "PMS done", "TRH init");
+    sensors.TMP_RH_Init(0x44);
+    displayThreeLines("CO2 done", "PMS done", "TRH done");
+
+#ifdef WIFI_ENABLED
+    setupWifi();
+#endif
+
+#ifdef SERVER_ENABLED
+    setupServer();
+#endif
+
+    fetchSensorsAndDisplay(millis());
+}
+
+void loop() {
+    auto t = millis();
+    fetchSensorsAndDisplay(t);
+#ifdef SERVER_ENABLED
+    server.handleClient();
+#endif
+#ifdef PUSH_ENABLED
+    pushInfluxMetrics(t);
+#endif
+}
