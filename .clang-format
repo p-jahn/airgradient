@@ -1,0 +1,7 @@
+Language: Cpp
+BasedOnStyle: LLVM
+IndentWidth: 4
+IndentPPDirectives: BeforeHash
+ColumnLimit: 0
+DerivePointerAlignment: false
+PointerAlignment: Left
