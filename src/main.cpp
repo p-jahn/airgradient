@@ -226,7 +226,7 @@ void serveMetrics() {
     appendPromGauge(promMetrics, "particulate_matter_2_5", "particle count (1µm to 2.5µm and below, atmospheric environment) in µg/m³", pm2.c_str());
     appendPromGauge(promMetrics, "particulate_matter_10", "particle count (2.5µm to 10µm, atmospheric environment) in µg/m³", pm10.c_str());
 
-    server.send(200, "text/plain", promMetrics);
+    server.send(200, "text/plain;charset=utf-8", promMetrics);
 }
 
 void setupServer() {
